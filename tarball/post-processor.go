@@ -37,6 +37,7 @@ type Config struct {
 	TarballExtension      string `mapstructure:"tarball_extension"`
 	GuestfishBinary       string `mapstructure:"guestfish_binary"`
 	GuestfishMountTimeout int    `mapstructure:"guestfish_mount_timeout"`
+        GuestfishMountDevice  string `mapstructure:"guestfish_mount_device"`
 	KeepInputArtifact     bool   `mapstructure:"keep_input_artifact"`
 	Compression           string `mapstructure:"compression"`
 
@@ -104,6 +105,8 @@ func (p *PostProcessor) Configure(raws ...interface{}) error {
 }
 
 func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (packer.Artifact, bool, error) {
+	var device string
+
 	// These are extra variables that will be made available for interpolation.
 	p.config.ctx.Data = map[string]string{
 		"BuildName":   p.config.PackerBuildName,
@@ -156,29 +159,34 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 		ui.Say(fmt.Sprintf("Loading %s into guestfish", src))
 		io.WriteString(w, fmt.Sprintf("add-drive %s\n", src))
 		io.WriteString(w, "run\n")
-		ui.Message("Finding root filesystem")
-		io.WriteString(w, "inspect-os\n")
 
-		// Read the response from Guestfish in a goroutine so that we can timeout
-		// if it is having problems finding the root filesystem.
-		var result Result
-		input := make(chan Result)
-		go func(chan Result) {
-			line, err := br.ReadString('\n')
-			input <- Result{Value: line, Err: err}
-		}(input)
+		if p.config.GuestfishMountDevice == "" {
+			ui.Message("Finding root filesystem")
+			io.WriteString(w, "inspect-os\n")
 
-		select {
-		case result = <-input:
-			if result.Err != nil && result.Err != io.EOF {
-				return nil, false, fmt.Errorf("Failed to locate root filesystem: %s", err)
+			// Read the response from Guestfish in a goroutine so that we can timeout
+			// if it is having problems finding the root filesystem.
+			var result Result
+			input := make(chan Result)
+			go func(chan Result) {
+				line, err := br.ReadString('\n')
+				input <- Result{Value: line, Err: err}
+			}(input)
+
+			select {
+			case result = <-input:
+				if result.Err != nil && result.Err != io.EOF {
+					return nil, false, fmt.Errorf("Failed to locate root filesystem: %s", err)
+				}
+			case <-time.After(time.Second * time.Duration(timeout)):
+				return nil, false, fmt.Errorf("Failed to locate root filesystem: timed out waiting for response from Guestfish.")
 			}
-		case <-time.After(time.Second * time.Duration(timeout)):
-			return nil, false, fmt.Errorf("Failed to locate root filesystem: timed out waiting for response from Guestfish.")
-		}
 
-		device := strings.TrimSpace(result.Value)
-		ui.Message(fmt.Sprintf("Found root filesystem at %s", device))
+			device = strings.TrimSpace(result.Value)
+			ui.Message(fmt.Sprintf("Found root filesystem at %s", device))
+                } else {
+			device = p.config.GuestfishMountDevice
+		}
 
 		ui.Message(fmt.Sprintf("Mounting %s to /", device))
 		io.WriteString(w, fmt.Sprintf("mount %s /\n", device))
